@@ -5,32 +5,25 @@ import pandas as pd
 def fft_df(d):
     return np.fft.fft(d)
 
-
 def time_to_frequency(df: pd.DataFrame):
-    df_fft = df.apply(fft_df)
+    df_fft = df.apply(np.fft.fft)
 
     # Real component
-    df_fft_real = pd.DataFrame(np.real(df_fft),
-                               index=df_fft.index,
-                               columns=df_fft.columns)
-
+    df_fft_real = pd.DataFrame(np.real(df_fft), index=df_fft.index, columns=df_fft.columns)
     df_fft_real.iloc[0] = df_fft_real.iloc[1]
 
-    df_fft_imag = pd.DataFrame(np.imag(df_fft),
-                               index=df_fft.index,
-                               columns=df_fft.columns)
-
+    df_fft_imag = pd.DataFrame(np.imag(df_fft), index=df_fft.index, columns=df_fft.columns)
     df_fft_imag.iloc[0] = df_fft_imag.iloc[1]
+
     df_fft_mag = np.sqrt(np.square(df_fft_real).add(np.square(df_fft_imag)))
 
     # Add _fft to the column names for future concat
-    col_names = [s + '_fft' for s in df_fft_mag.columns]
+    col_names = [str(s) + '_fft' for s in df_fft_mag.columns]
     df_fft_mag.columns = col_names
     df_fft_real.columns = col_names
     df_fft_imag.columns = col_names
 
     return df_fft_mag, df_fft_real, df_fft_imag
-
 
 def rolling_ranges(df: pd.DataFrame, min_window, max_window=None,
                    measures=("mean", "var"), lag=1, dropna=True):
