@@ -1,11 +1,15 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import glob
 import os
 import sys
+import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, mutual_info_regression
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 import data_transforms as dt  
@@ -24,6 +28,7 @@ def main():
         sys.exit('No dataset found')
 
     data_dict = {}
+    scaled_data_dict = {} 
     for file_path in files:
         file_name = os.path.basename(file_path)
         print(f'Loading {file_name}...')
@@ -36,120 +41,181 @@ def main():
             print(f'{key}, Shape: {data.shape}')
             data_dict[key] = data
 
-            print('Dataframe Info/Description')
-            print(data.info())
-            print(data.describe())
+            var_thres = VarianceThreshold(threshold=0)
+            var_thres.fit(data)
+            constant_columns = [column for column in data.columns if column not in data.columns[var_thres.get_support()]]
+            data = data.drop(columns=constant_columns)
 
+            scaler = StandardScaler()
+            scaled_data = scaler.fit_transform(data)
+            scaled_data_dict[key] = pd.DataFrame(scaled_data, columns=data.columns)
+            # print(scaled_data_dict[key].head())
+
+            # print('Dataframe Info/Description')
+            # print(data.info())
+            # print(data.describe())
+    
     ans_df = pd.read_csv(os.path.join(dataset_dir, 'profile.txt'), sep='\t', header=None,
                          names=['Cooler', 'Valve', 'Pump', 'Accumulator', 'Stable'])
+    y = ans_df['Cooler'].values  
+   
+    X = pd.concat([scaled_data_dict[key] for key in scaled_data_dict.keys()], axis=1)
 
-    unstables = np.where(ans_df['Stable'].values == 0)[0]
-    stables = np.where(ans_df['Stable'].values == 1)[0]
+    
+    bestfeatures = SelectKBest(score_func=mutual_info_regression, k=10)
+    fit = bestfeatures.fit(X, y)
+    dfscores = pd.DataFrame(fit.scores_)
+    dfcolumns = pd.DataFrame(X.columns)
+    featureScores = pd.concat([dfcolumns, dfscores], axis=1)
+    featureScores.columns = ['Feature', 'Score']
+    # print("Top 10 features:")
+    # print(featureScores.nlargest(10, 'Score'))
 
-    num = 250
 
-    # Plot Time series
-    num_keys = len(data_dict.keys())
-    cols = 4
-    rows = int(np.ceil(num_keys / cols))
+    selected_features_indices = fit.get_support(indices=True)
+    selected_features = X.columns[selected_features_indices]
+    selected_features_df = featureScores[featureScores['Feature'].isin(selected_features)]
+    # print(f"Selected features:\n{selected_features_df}")
 
-    plt.figure(figsize=(20, rows * 4))
-    for i, key in enumerate(data_dict.keys()):
-        plt.subplot(rows, cols, i + 1)
-        plt.title(f'{key} - Time Series', fontsize=6)
-        for v in stables[:num - 1]:
-            plt.plot(data_dict[key].iloc[v], color='green')
-        plt.plot(data_dict[key].iloc[stables[num]], label='stable', color='green')
-        for v in unstables[:num]:
-            plt.plot(data_dict[key].iloc[v], color='red', alpha=0.5)
-        plt.plot(data_dict[key].iloc[unstables[num]], label='unstable', color='red', alpha=0.5)
-        plt.legend(loc='upper right', fontsize=8)
-        plt.xticks(fontsize=6)
-        plt.yticks(fontsize=6)
+ 
+    X_new = bestfeatures.transform(X)
 
-    plt.tight_layout(pad=3.0)
+    X_train, X_test, y_train, y_test = train_test_split(X_new, y, test_size=0.2, random_state=42)
+
+    print(f'X_train shape: {X_train.shape}')
+    print(f'X_test shape: {X_test.shape}')
+    print(f'y_train shape: {y_train.shape}')
+    print(f'y_test shape: {y_test.shape}')
+
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred)
+
+    # print(f'Accuracy: {accuracy}')
+    # print('Classification Report:')
+    # print(report)
+
+    X_selected = pd.DataFrame(X_new, columns=selected_features)
+    
+
+    corr_matrix = X_selected.corr()
+    
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f', linewidths=.5)
+    plt.title('Heatmap of Cooler Condition')
     plt.show()
 
-    # Plot Fourier transform
-    plt.figure(figsize=(20, rows * 4))
-    for i, key in enumerate(data_dict.keys()):
-        df_fft_mag, df_fft_real, df_fft_imag = dt.time_to_frequency(data_dict[key])
-        plt.subplot(rows, cols, i + 1)
-        plt.title(f'{key} - Fourier Transform', fontsize=6)
-        for v in stables[:num]:
-            plt.plot(df_fft_mag.iloc[v], color='green')
-        for v in unstables[:num]:
-            plt.plot(df_fft_mag.iloc[v], color='red', alpha=0.5)
-        plt.xticks([])
-        plt.yticks(fontsize=6)
+#     unstables = np.where(ans_df['Stable'].values == 0)[0]
+#     stables = np.where(ans_df['Stable'].values == 1)[0]
 
-    plt.tight_layout(pad=3.0)
-    plt.show()
+#     num = 250
 
-    # PCA Visualization - Time Domain
-    pca_max = min([len(df.columns) for df in data_dict.values()])  
+#     # Plot Time series
+#     num_keys = len(data_dict.keys())
+#     cols = 4
+#     rows = int(np.ceil(num_keys / cols))
 
-    plt.figure()
-    for key in data_dict.keys():
-        engine_df = data_dict[key]
+#     plt.figure(figsize=(20, rows * 4))
+#     for i, key in enumerate(data_dict.keys()):
+#         plt.subplot(rows, cols, i + 1)
+#         plt.title(f'{key} - Time Series', fontsize=6)
+#         for v in stables[:num - 1]:
+#             plt.plot(data_dict[key].iloc[v], color='green')
+#         plt.plot(data_dict[key].iloc[stables[num]], label='stable', color='green')
+#         for v in unstables[:num]:
+#             plt.plot(data_dict[key].iloc[v], color='red', alpha=0.5)
+#         plt.plot(data_dict[key].iloc[unstables[num]], label='unstable', color='red', alpha=0.5)
+#         plt.legend(loc='upper right', fontsize=8)
+#         plt.xticks(fontsize=6)
+#         plt.yticks(fontsize=6)
 
-        std_scaler = StandardScaler()  
-        engine_df_scaled = std_scaler.fit_transform(engine_df)
+#     plt.tight_layout(pad=3.0)
+#     plt.show()
 
-        if pca_max > len(engine_df.columns): 
-            pca_max = len(engine_df.columns)
-        pca_range = np.arange(start=1, stop=pca_max + 1)
-        var_ratio = []
-        for num in pca_range:
-            pca = PCA(n_components=num, whiten=False)
-            pca.fit(engine_df_scaled)
-            var_ratio.append(np.sum(pca.explained_variance_ratio_))
+#     # Plot Fourier transform
+#     plt.figure(figsize=(20, rows * 4))
+#     for i, key in enumerate(data_dict.keys()):
+#         df_fft_mag, df_fft_real, df_fft_imag = dt.time_to_frequency(data_dict[key])
+#         plt.subplot(rows, cols, i + 1)
+#         plt.title(f'{key} - Fourier Transform', fontsize=6)
+#         for v in stables[:num]:
+#             plt.plot(df_fft_mag.iloc[v], color='green')
+#         for v in unstables[:num]:
+#             plt.plot(df_fft_mag.iloc[v], color='red', alpha=0.5)
+#         plt.xticks([])
+#         plt.yticks(fontsize=6)
 
-        plt.plot(pca_range, var_ratio, marker='o', label=f'{key}')
+#     plt.tight_layout(pad=3.0)
+#     plt.show()
 
-    plt.grid()
-    plt.xlabel('# Components')
-    plt.ylabel('Explained Variance Ratio')
-    plt.title('Time Domain PCA')
-    plt.legend()
-    plt.show()
+#     # PCA Visualization - Time Domain
+#     pca_max = min([len(df.columns) for df in data_dict.values()])  
 
-    # PCA Visualization - Frequency Domain
-    plt.figure()
-    for key in data_dict.keys():
-        engine_df = data_dict[key]
+#     plt.figure()
+#     for key in data_dict.keys():
+#         engine_df = data_dict[key]
 
-        engine_data_fft = engine_df.apply(dt.fft_df)
-        engine_data_fft_real = pd.DataFrame(np.real(engine_data_fft),
-                                            index=engine_data_fft.index,
-                                            columns=engine_data_fft.columns)
-        engine_data_fft_real.iloc[0] = engine_data_fft_real.iloc[1]
-        engine_data_fft_imag = pd.DataFrame(np.imag(engine_data_fft),
-                                            index=engine_data_fft.index,
-                                            columns=engine_data_fft.columns)
-        engine_data_fft_imag.iloc[0] = engine_data_fft_imag.iloc[1]
-        engine_df = np.sqrt(np.square(engine_data_fft_real).add(np.square(engine_data_fft_imag)))
+#         std_scaler = StandardScaler()  
+#         engine_df_scaled = std_scaler.fit_transform(engine_df)
 
-        std_scaler = StandardScaler()  
-        engine_df_scaled = std_scaler.fit_transform(engine_df)
+#         if pca_max > len(engine_df.columns): 
+#             pca_max = len(engine_df.columns)
+#         pca_range = np.arange(start=1, stop=pca_max + 1)
+#         var_ratio = []
+#         for num in pca_range:
+#             pca = PCA(n_components=num, whiten=False)
+#             pca.fit(engine_df_scaled)
+#             var_ratio.append(np.sum(pca.explained_variance_ratio_))
 
-        if pca_max > len(engine_df.columns):
-            pca_max = len(engine_df.columns)
-        pca_range = np.arange(start=1, stop=pca_max + 1)
-        var_ratio = []
-        for num in pca_range:
-            pca = PCA(n_components=num)
-            pca.fit(engine_df_scaled)
-            var_ratio.append(np.sum(pca.explained_variance_ratio_))
+#         plt.plot(pca_range, var_ratio, marker='o', label=f'{key}')
 
-        plt.plot(pca_range, var_ratio, marker='o', label=f'{key}')
+#     plt.grid()
+#     plt.xlabel('# Components')
+#     plt.ylabel('Explained Variance Ratio')
+#     plt.title('Time Domain PCA')
+#     plt.legend()
+#     plt.show()
 
-    plt.grid()
-    plt.xlabel('# Components')
-    plt.ylabel('Explained Variance Ratio')
-    plt.title('Frequency Domain PCA')
-    plt.legend()
-    plt.show()
+#     # PCA Visualization - Frequency Domain
+#     plt.figure()
+#     for key in data_dict.keys():
+#         engine_df = data_dict[key]
+
+#         engine_data_fft = engine_df.apply(dt.fft_df)
+#         engine_data_fft_real = pd.DataFrame(np.real(engine_data_fft),
+#                                             index=engine_data_fft.index,
+#                                             columns=engine_data_fft.columns)
+#         engine_data_fft_real.iloc[0] = engine_data_fft_real.iloc[1]
+#         engine_data_fft_imag = pd.DataFrame(np.imag(engine_data_fft),
+#                                             index=engine_data_fft.index,
+#                                             columns=engine_data_fft.columns)
+#         engine_data_fft_imag.iloc[0] = engine_data_fft_imag.iloc[1]
+#         engine_df = np.sqrt(np.square(engine_data_fft_real).add(np.square(engine_data_fft_imag)))
+
+#         std_scaler = StandardScaler()  
+#         engine_df_scaled = std_scaler.fit_transform(engine_df)
+
+#         if pca_max > len(engine_df.columns):
+#             pca_max = len(engine_df.columns)
+#         pca_range = np.arange(start=1, stop=pca_max + 1)
+#         var_ratio = []
+#         for num in pca_range:
+#             pca = PCA(n_components=num)
+#             pca.fit(engine_df_scaled)
+#             var_ratio.append(np.sum(pca.explained_variance_ratio_))
+
+#         plt.plot(pca_range, var_ratio, marker='o', label=f'{key}')
+
+#     plt.grid()
+#     plt.xlabel('# Components')
+#     plt.ylabel('Explained Variance Ratio')
+#     plt.title('Frequency Domain PCA')
+#     plt.legend()
+#     plt.show()
 
 if __name__ == "__main__":
     main()
