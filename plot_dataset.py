@@ -7,8 +7,10 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import VarianceThreshold, SelectKBest, mutual_info_regression
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import classification_report, accuracy_score
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
@@ -61,7 +63,6 @@ def main():
    
     X = pd.concat([scaled_data_dict[key] for key in scaled_data_dict.keys()], axis=1)
 
-    
     bestfeatures = SelectKBest(score_func=mutual_info_regression, k=10)
     fit = bestfeatures.fit(X, y)
     dfscores = pd.DataFrame(fit.scores_)
@@ -71,13 +72,11 @@ def main():
     # print("Top 10 features:")
     # print(featureScores.nlargest(10, 'Score'))
 
-
     selected_features_indices = fit.get_support(indices=True)
     selected_features = X.columns[selected_features_indices]
     selected_features_df = featureScores[featureScores['Feature'].isin(selected_features)]
     # print(f"Selected features:\n{selected_features_df}")
 
- 
     X_new = bestfeatures.transform(X)
 
     X_train, X_test, y_train, y_test = train_test_split(X_new, y, test_size=0.2, random_state=42)
@@ -87,27 +86,65 @@ def main():
     print(f'y_train shape: {y_train.shape}')
     print(f'y_test shape: {y_test.shape}')
 
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+    
+    rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+    rf_model.fit(X_train, y_train)
+    y_pred_rf = rf_model.predict(X_test)
+    accuracy_rf = accuracy_score(y_test, y_pred_rf)
+    report_rf = classification_report(y_test, y_pred_rf)
 
-    y_pred = model.predict(X_test)
+    print(f'RandomForestClassifier Accuracy: {accuracy_rf}')
+    print('RandomForestClassifier Classification Report:')
+    print(report_rf)
 
-    accuracy = accuracy_score(y_test, y_pred)
-    report = classification_report(y_test, y_pred)
+    
+    param_grid_svc = [
+        {'kernel': ['linear'], 'C': [0.1, 1, 10, 100]},
+        {'kernel': ['rbf'], 'C': [0.1, 1, 10, 100], 'gamma': [1, 0.1, 0.01, 0.001]},
+        {'kernel': ['poly'], 'C': [0.1, 1, 10, 100], 'degree': [2, 3, 4], 'gamma': ['scale', 'auto']},
+        {'kernel': ['sigmoid'], 'C': [0.1, 1, 10, 100], 'gamma': [1, 0.1, 0.01, 0.001]},
+    ]
+    svm = SVC()
+    grid_search_svc = GridSearchCV(svm, param_grid_svc, refit=True, cv=5)
+    grid_search_svc.fit(X_train, y_train)
+    best_svm = grid_search_svc.best_estimator_
 
-    # print(f'Accuracy: {accuracy}')
-    # print('Classification Report:')
-    # print(report)
+    y_pred_svm = best_svm.predict(X_test)
+    accuracy_svm = accuracy_score(y_test, y_pred_svm)
+    report_svm = classification_report(y_test, y_pred_svm)
+
+    print(f'Best SVM parameters: {grid_search_svc.best_params_}')
+    print(f'SVM Accuracy: {accuracy_svm}')
+    print('SVM Classification Report:')
+    print(report_svm)
+
+    
+    param_grid_knn = {'n_neighbors': np.arange(1, 31)}
+    knn = KNeighborsClassifier()
+    grid_search_knn = GridSearchCV(knn, param_grid_knn, cv=5)
+    grid_search_knn.fit(X_train, y_train)
+    best_k = grid_search_knn.best_params_['n_neighbors']
+    print(f'Optimal number of neighbors: {best_k}')
+    
+    
+    knn_model = KNeighborsClassifier(n_neighbors=best_k)
+    knn_model.fit(X_train, y_train)
+    y_pred_knn = knn_model.predict(X_test)
+    accuracy_knn = accuracy_score(y_test, y_pred_knn)
+    report_knn = classification_report(y_test, y_pred_knn)
+
+    print(f'KNN Accuracy: {accuracy_knn}')
+    print('KNN Classification Report:')
+    print(report_knn)
 
     X_selected = pd.DataFrame(X_new, columns=selected_features)
-    
 
     corr_matrix = X_selected.corr()
     
     plt.figure(figsize=(10, 8))
     sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f', linewidths=.5)
     plt.title('Heatmap of Cooler Condition')
-    plt.show()
+    # plt.show()
 
 #     unstables = np.where(ans_df['Stable'].values == 0)[0]
 #     stables = np.where(ans_df['Stable'].values == 1)[0]
