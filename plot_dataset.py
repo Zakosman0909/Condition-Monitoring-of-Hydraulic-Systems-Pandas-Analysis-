@@ -53,7 +53,6 @@ def main():
             key = file_name.split('.')[0]
             print(f'{key}, Shape: {data.shape}')
             data_dict[key] = data
-            print(f"Data from {file_name}:\n", data.head())
 
             # Remove constant columns
             var_thres = VarianceThreshold(threshold=0)
