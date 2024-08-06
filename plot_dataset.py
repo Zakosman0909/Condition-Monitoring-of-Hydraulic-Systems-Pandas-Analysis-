@@ -44,7 +44,7 @@ def main():
         print(f'Loading {file_name}...')
 
         # Skip non-data files
-        if 'description' in file_name or 'documentation' in file_name or 'profile' in file_name:
+        if 'description' in file_name or 'documentation' in file_name or 'profile' in file_name or 'readme' in file_name:
             continue
         else:
             data = file_read(file_path)
@@ -53,6 +53,7 @@ def main():
             key = file_name.split('.')[0]
             print(f'{key}, Shape: {data.shape}')
             data_dict[key] = data
+            print(f"Data from {file_name}:\n", data.head())
 
             # Remove constant columns
             var_thres = VarianceThreshold(threshold=0)
@@ -64,7 +65,7 @@ def main():
             scaler = StandardScaler()
             scaled_data = scaler.fit_transform(data)
             scaled_data_dict[key] = pd.DataFrame(scaled_data, columns=data.columns)
-            # print(scaled_data_dict[key].head())
+                # print(scaled_data_dict[key].head())
 
             # print('Dataframe Info/Description')
             # print(data.info())
