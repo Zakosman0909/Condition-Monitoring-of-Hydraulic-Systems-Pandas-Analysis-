@@ -5,14 +5,13 @@ import os
 import sys
 import seaborn as sns
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.feature_selection import VarianceThreshold, SelectKBest, mutual_info_regression
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.feature_selection import SelectKBest, mutual_info_regression
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics import classification_report, accuracy_score
-from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.pipeline import Pipeline
+import xgboost as xgb
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 import data_transforms as dt  
@@ -25,6 +24,29 @@ def file_read(file_path):
         print(f"Warning: The file {file_path} is empty and will be skipped.")
         return pd.DataFrame()  # Return an empty DataFrame if the file is empty
 
+def resample_data(data, target_frequency=1):
+    """Resamples the data to the target frequency (in Hz)."""
+    current_frequency = 100 
+    resampling_factor = current_frequency // target_frequency
+    return data.iloc[::resampling_factor, :]
+
+def aggregate_features(data, window_size=10):
+    """Aggregates the data by calculating rolling statistics (mean and std) over the window size."""
+    if data.shape[0] < window_size:
+        print(f"Data too short to aggregate with window size {window_size}.")
+        return pd.DataFrame()  # Return empty DataFrame if not enough data to aggregate
+    
+    rolling_mean = data.rolling(window=window_size, min_periods=1).mean()
+    rolling_std = data.rolling(window=window_size, min_periods=1).std()
+    aggregated_data = pd.concat([rolling_mean, rolling_std], axis=1)
+    aggregated_data.columns = [f'{col}_mean' for col in data.columns] + [f'{col}_std' for col in data.columns]
+    return aggregated_data.dropna()
+
+def ensure_numeric(df):
+    """Ensure all columns in the DataFrame are numeric."""
+    df = df.apply(pd.to_numeric, errors='coerce')
+    return df
+
 def main():
     print("Running Test on Hydraulic Systems dataset")
 
@@ -36,9 +58,8 @@ def main():
     if not files:
         sys.exit('No dataset found')
 
-    # Initialize dictionary to store raw and scaled data
+    # Initialize dictionary to store processed data
     data_dict = {}
-    scaled_data_dict = {} 
     for file_path in files:
         file_name = os.path.basename(file_path)
         print(f'Loading {file_name}...')
@@ -48,122 +69,131 @@ def main():
             continue
         else:
             data = file_read(file_path)
-            if data.empty:  # Skip the file if it's empty
+            if data.empty:  
+                print(f'{file_name} is empty after reading.')
                 continue
+            
             key = file_name.split('.')[0]
-            print(f'{key}, Shape: {data.shape}')
+            print(f'{key}, Initial Shape: {data.shape}')
+            data = resample_data(data, target_frequency=1)  # Resample data to 1 Hz
+            if data.empty:
+                print(f'{file_name} is empty after resampling.')
+                continue
+            
+            data = aggregate_features(data)  # Aggregate features with rolling statistics
+            if data.empty:
+                print(f'{file_name} is empty after aggregation.')
+                continue
+            
             data_dict[key] = data
+            print(f'{key}, Final Shape: {data.shape}')
 
-            # Remove constant columns
-            var_thres = VarianceThreshold(threshold=0)
-            var_thres.fit(data)
-            constant_columns = [column for column in data.columns if column not in data.columns[var_thres.get_support()]]
-            data = data.drop(columns=constant_columns)
+    if not data_dict:
+        sys.exit('No valid data was loaded after processing.')
 
-            # Standardize the data
-            scaler = StandardScaler()
-            scaled_data = scaler.fit_transform(data)
-            scaled_data_dict[key] = pd.DataFrame(scaled_data, columns=data.columns)
-                # print(scaled_data_dict[key].head())
+    # Concatenate all processed data into a single DataFrame
+    X = pd.concat([data_dict[key] for key in data_dict.keys()], axis=1)
 
-            # print('Dataframe Info/Description')
-            # print(data.info())
-            # print(data.describe())
+    if X.empty:
+        sys.exit('The concatenated DataFrame X is empty.')
 
     # Load the target variable data
     ans_df = pd.read_csv(os.path.join(dataset_dir, 'profile.txt'), sep='\t', header=None,
                          names=['Cooler', 'Valve', 'Pump', 'Accumulator', 'Stable'])
-    y = ans_df['Cooler'].values  # Target variable: Cooler condition
 
-    # Concatenate all scaled data into a single DataFrame
-    X = pd.concat([scaled_data_dict[key] for key in scaled_data_dict.keys() if not scaled_data_dict[key].empty], axis=1)
+    # Adjust the target variable length to match the aggregated data
+    y = ans_df['Cooler'].iloc[X.index].values
+
+    # Encode the labels to sequential integers starting from 0
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
 
     # Split the data into training and test sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
     print(f'X_train shape: {X_train.shape}')
     print(f'X_test shape: {X_test.shape}')
     print(f'y_train shape: {y_train.shape}')
     print(f'y_test shape: {y_test.shape}')
 
-    # Data preprocessing and feature selection pipeline
-    preprocessing_pipeline = Pipeline(steps=[
-        ('var_thres', VarianceThreshold(threshold=0)),
+    # Ensure all data is numeric
+    X_train = ensure_numeric(X_train)
+    X_test = ensure_numeric(X_test)
+
+    # Convert DataFrame to NumPy array before passing to XGBoost
+    X_train_np = X_train.to_numpy()
+    X_test_np = X_test.to_numpy()
+
+    # Define the pipeline with preprocessing, feature selection, and model
+    pipeline = Pipeline(steps=[
         ('scaler', StandardScaler()),
-        ('feature_selection', SelectKBest(score_func=mutual_info_regression, k=10))
+        ('feature_selection', SelectKBest(score_func=mutual_info_regression, k=10)),
+        ('classifier', RandomForestClassifier(n_estimators=100, random_state=42))
     ])
 
-    # Fit the preprocessing pipeline on the training data
-    X_train_transformed = preprocessing_pipeline.fit_transform(X_train, y_train)
-    X_test_transformed = preprocessing_pipeline.transform(X_test)
-
-    # Extract selected feature names
-    selected_features = X.columns[preprocessing_pipeline.named_steps['feature_selection'].get_support()]
-    selected_features_df = pd.DataFrame({
-        'Feature': selected_features,
-        'Score': preprocessing_pipeline.named_steps['feature_selection'].scores_[preprocessing_pipeline.named_steps['feature_selection'].get_support()]
-    })
-
-    print(f"Selected features:\n{selected_features_df}")
-
-    # Train and evaluate Random Forest model
-    rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
-    rf_model.fit(X_train_transformed, y_train)
-    y_pred_rf = rf_model.predict(X_test_transformed)
-    accuracy_rf = accuracy_score(y_test, y_pred_rf)
-    report_rf = classification_report(y_test, y_pred_rf)
-
-    print(f'RandomForestClassifier Accuracy: {accuracy_rf}')
-    print('RandomForestClassifier Classification Report:')
-    print(report_rf)
-
-  # Define parameter grid and pipeline for SVM
-    svc_pipeline = make_pipeline(preprocessing_pipeline, SVC())
-    param_grid_svc = {
-        'svc__kernel': ['linear', 'rbf', 'poly', 'sigmoid'],
-        'svc__C': [0.1, 1, 10, 100],
-        'svc__gamma': ['scale', 'auto', 1, 0.1, 0.01, 0.001],
-        'svc__degree': [2, 3, 4]
+    # Define the parameter grid for GridSearchCV
+    param_grid = {
+        'feature_selection__k': [10, 20, 30],
+        'classifier__n_estimators': [50, 100, 200],
+        'classifier__max_depth': [None, 10, 20]
     }
-    grid_search_svc = GridSearchCV(svc_pipeline, param_grid_svc, refit=True, cv=5)
-    grid_search_svc.fit(X_train, y_train)
-    best_svm = grid_search_svc.best_estimator_
 
-    y_pred_svm = best_svm.predict(X_test)
-    accuracy_svm = accuracy_score(y_test, y_pred_svm)
-    report_svm = classification_report(y_test, y_pred_svm)
+    # Initialize GridSearchCV with the pipeline and parameter grid
+    grid_search = GridSearchCV(pipeline, param_grid, cv=5, n_jobs=-1)
+    grid_search.fit(X_train, y_train)
 
-    print(f'Best SVM parameters: {grid_search_svc.best_params_}')
-    print(f'SVM Accuracy: {accuracy_svm}')
-    print('SVM Classification Report:')
-    print(report_svm)
+    # Get the best pipeline and parameters
+    best_pipeline = grid_search.best_estimator_
+    best_params = grid_search.best_params_
 
-    # Define parameter grid and pipeline for KNN
-    knn_pipeline = make_pipeline(preprocessing_pipeline, KNeighborsClassifier())
-    param_grid_knn = {'kneighborsclassifier__n_neighbors': np.arange(1, 31)}
-    grid_search_knn = GridSearchCV(knn_pipeline, param_grid_knn, cv=5)
-    grid_search_knn.fit(X_train, y_train)
-    best_k = grid_search_knn.best_params_['kneighborsclassifier__n_neighbors']
+    # Predict on the test set using the best pipeline
+    y_pred = best_pipeline.predict(X_test)
+
+    y_pred_original = label_encoder.inverse_transform(y_pred)
+    y_test_original = label_encoder.inverse_transform(y_test)
+
+    # Evaluate the model
+    accuracy = accuracy_score(y_test_original, y_pred_original)
+    precision = precision_score(y_test_original, y_pred_original, average='macro')
+    recall = recall_score(y_test_original, y_pred_original, average='macro')
+    f1 = f1_score(y_test_original, y_pred_original, average='macro')
+    report = classification_report(y_test_original, y_pred_original)
+
+    print(f'Best pipeline parameters: {best_params}')
+    print(f'Accuracy: {accuracy}')
+    print(f'Precision: {precision}')
+    print(f'Recall: {recall}')
+    print(f'F1 Score: {f1}')
+    print('Classification Report:')
+    print(report)
+
+    # Train and evaluate XGBoost model
+    xgb_model = xgb.XGBClassifier(eval_metric='mlogloss', random_state=42)
+    xgb_model.fit(X_train_np, y_train)
+    y_pred_xgb = xgb_model.predict(X_test_np)
+
     
-    y_pred_knn = grid_search_knn.predict(X_test)
-    accuracy_knn = accuracy_score(y_test, y_pred_knn)
-    report_knn = classification_report(y_test, y_pred_knn)
+    y_pred_xgb_original = label_encoder.inverse_transform(y_pred_xgb)
 
-    print(f'Optimal number of neighbors: {best_k}')
-    print(f'KNN Accuracy: {accuracy_knn}')
-    print('KNN Classification Report:')
-    print(report_knn)
+    accuracy_xgb = accuracy_score(y_test_original, y_pred_xgb_original)
+    report_xgb = classification_report(y_test_original, y_pred_xgb_original, zero_division=0)
+
+    print(f'XGBoost Accuracy: {accuracy_xgb}')
+    print('XGBoost Classification Report:')
+    print(report_xgb)
 
     # Correlation matrix for selected features
-    X_train_transformed = preprocessing_pipeline.fit_transform(X_train, y_train)
-    X_selected = pd.DataFrame(X_train_transformed, columns=selected_features_df['Feature'])
+    X_train_transformed = best_pipeline.named_steps['feature_selection'].transform(X_train_np)
+    selected_features = X.columns[best_pipeline.named_steps['feature_selection'].get_support()]
+    X_selected = pd.DataFrame(X_train_transformed, columns=selected_features)
 
     corr_matrix = X_selected.corr()
-    
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f', linewidths=.5)
-    plt.title('Heatmap of Cooler Condition')
-    # plt.show()
 
+    plt.figure(figsize=(15, 12))  
+    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f', annot_kws={"size": 8}, linewidths=.5) 
+    plt.title('Heatmap of Cooler Condition', fontsize=16)
+    plt.xticks(rotation=45, ha='right', fontsize=10)  
+    plt.yticks(rotation=0, fontsize=10)  
+    plt.show()
 
 #     unstables = np.where(ans_df['Stable'].values == 0)[0]
 #     stables = np.where(ans_df['Stable'].values == 1)[0]
